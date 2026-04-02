@@ -1,0 +1,288 @@
+﻿<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>5.A PRIVATE SERVER</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #020617; color: #f8fafc; margin: 0; height: 100vh; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .message-bubble { animation: slideUp 0.2s ease-out; }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="bg-slate-950">
+    <div id="root" class="h-full">
+        <!-- Načítavacia obrazovka -->
+        <div class="flex items-center justify-center h-full">
+            <div class="text-center">
+                <div class="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                <p class="text-slate-500 font-bold uppercase tracking-widest text-xs">Pripájanie k serveru...</p>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+        import { getFirestore, collection, doc, addDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+
+        // Konfigurácia zo systému
+        const firebaseConfig = JSON.parse(window.__firebase_config || '{}');
+        const appId = window.__app_id || 'default-5a-server';
+        const initialToken = window.__initial_auth_token;
+        
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        let state = {
+            user: null, // Údaje o žiakovi (z našej kolekcie)
+            fbUser: null, // Firebase Auth používateľ
+            isLoggedIn: false,
+            activeTab: 'chat',
+            activeChatId: 'common',
+            messages: []
+        };
+
+        // --- POMOCNÉ FUNKCIE PRE CESTY (Pravidlo 1) ---
+        const getColl = (name) => collection(db, 'artifacts', appId, 'public', 'data', name);
+        const getMsgColl = (chatId) => collection(db, 'artifacts', appId, 'public', 'data', 'conversations', chatId, 'messages');
+
+        // --- RENDER JADRO ---
+        function updateUI() {
+            const root = document.getElementById('root');
+            
+            // Ak ešte nie sme prihlásení cez Firebase Auth, čakáme
+            if (!state.fbUser) {
+                return; 
+            }
+
+            if (!state.isLoggedIn) {
+                root.innerHTML = renderLogin();
+                return;
+            }
+
+            root.innerHTML = `
+                <div class="flex h-screen overflow-hidden">
+                    <!-- Bočný panel -->
+                    <aside class="w-20 md:w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
+                        <div class="p-6 md:p-8 border-b border-slate-800">
+                            <h1 class="font-black text-indigo-500 text-xl flex items-center gap-2">
+                                <span>🏫</span> <span class="hidden md:inline text-sm tracking-tighter uppercase text-slate-200">Trieda 5.A</span>
+                            </h1>
+                        </div>
+                        <nav class="flex-1 py-4">
+                            <button onclick="window.setTab('chat')" class="w-full flex items-center gap-4 px-6 py-4 ${state.activeTab === 'chat' ? 'text-indigo-400 bg-indigo-500/5 border-r-2 border-indigo-500' : 'text-slate-500'}">
+                                <i data-lucide="message-square"></i> <span class="hidden md:block font-bold text-xs uppercase">Chaty</span>
+                            </button>
+                            ${state.user?.role === 'admin' ? `
+                                <button onclick="window.setTab('admin')" class="w-full flex items-center gap-4 px-6 py-4 ${state.activeTab === 'admin' ? 'text-indigo-400 bg-indigo-500/5 border-r-2 border-indigo-500' : 'text-slate-500'}">
+                                    <i data-lucide="shield"></i> <span class="hidden md:block font-bold text-xs uppercase">Admin</span>
+                                </button>
+                            ` : ''}
+                        </nav>
+                        <div class="p-4 border-t border-slate-800">
+                            <div class="bg-slate-800/50 p-3 rounded-2xl flex items-center gap-3">
+                                <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-lg">${state.user?.avatar || '👤'}</div>
+                                <div class="hidden md:block overflow-hidden">
+                                    <p class="text-[10px] font-black text-indigo-400 uppercase leading-none">${state.user?.role || 'Hosť'}</p>
+                                    <p class="text-xs font-bold truncate">${state.user?.displayName || 'Anonym'}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </aside>
+
+                    <!-- Hlavná časť -->
+                    <main class="flex-1 flex flex-col min-w-0">
+                        <header class="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-950/50">
+                            <div class="flex items-center gap-2 text-emerald-500 text-[10px] font-black uppercase">
+                                <div class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div> Server Online
+                            </div>
+                        </header>
+
+                        <div class="flex-1 p-4 md:p-6 overflow-hidden">
+                            ${state.activeTab === 'chat' ? renderChat() : renderAdmin()}
+                        </div>
+                    </main>
+                </div>
+            `;
+            if (window.lucide) lucide.createIcons();
+            if (state.activeTab === 'chat') setupScroll();
+        }
+
+        function renderLogin() {
+            return `
+                <div class="flex items-center justify-center h-full p-4">
+                    <div class="bg-slate-900 p-8 rounded-[2rem] border border-slate-800 w-full max-w-sm shadow-2xl">
+                        <div class="text-4xl mb-4 text-center">🔐</div>
+                        <h2 class="text-2xl font-black text-center mb-8 uppercase tracking-tighter">Vstup do 5.A</h2>
+                        <input id="u" type="text" placeholder="Meno" class="w-full bg-slate-800 border border-slate-700 p-4 rounded-2xl mb-3 outline-none focus:ring-2 ring-indigo-500">
+                        <input id="p" type="password" placeholder="Heslo" class="w-full bg-slate-800 border border-slate-700 p-4 rounded-2xl mb-6 outline-none focus:ring-2 ring-indigo-500">
+                        <button onclick="window.login()" class="w-full bg-indigo-600 py-4 rounded-2xl font-black uppercase text-xs tracking-widest hover:bg-indigo-500 transition shadow-lg">Prihlásiť sa</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderChat() {
+            return `
+                <div class="h-full bg-slate-900 rounded-[2.5rem] border border-slate-800 flex flex-col overflow-hidden shadow-2xl">
+                    <div class="p-6 border-b border-slate-800 flex items-center justify-between">
+                        <h3 class="font-black text-white uppercase text-sm tracking-widest"># Verejná hala</h3>
+                    </div>
+                    <div id="msg-box" class="flex-1 overflow-y-auto p-6 space-y-4 no-scrollbar">
+                        ${state.messages.map(m => `
+                            <div class="flex gap-3 ${m.senderUid === state.user?.id ? 'flex-row-reverse' : ''} message-bubble">
+                                <div class="w-9 h-9 bg-slate-800 rounded-xl flex items-center justify-center text-lg shrink-0">${m.avatar || '👤'}</div>
+                                <div class="${m.senderUid === state.user?.id ? 'text-right' : ''}">
+                                    <p class="text-[9px] font-bold text-slate-500 uppercase mb-1">${m.sender}</p>
+                                    <div class="p-3 rounded-2xl text-sm ${m.senderUid === state.user?.id ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-slate-800 text-slate-200 rounded-tl-none border border-slate-700'}">
+                                        ${m.text}
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div class="p-4 border-t border-slate-800 bg-slate-900/50">
+                        <form onsubmit="window.send(event)" class="flex gap-2">
+                            <input id="msg-in" type="text" placeholder="Napíš správu..." class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:ring-2 ring-indigo-500">
+                            <button type="submit" class="bg-indigo-600 px-6 rounded-xl hover:bg-indigo-500 transition shadow-lg"><i data-lucide="send" size="18"></i></button>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderAdmin() {
+            return `
+                <div class="max-w-xl mx-auto bg-slate-900 p-8 rounded-[2rem] border border-slate-800">
+                    <h2 class="text-xl font-black mb-6 uppercase">Správa spolužiakov</h2>
+                    <div class="space-y-4">
+                        <input id="an" type="text" placeholder="Celé meno žiaka" class="w-full bg-slate-800 border border-slate-700 p-3 rounded-xl outline-none">
+                        <div class="grid grid-cols-2 gap-3">
+                            <input id="au" type="text" placeholder="Prihlasovacie meno" class="bg-slate-800 border border-slate-700 p-3 rounded-xl outline-none">
+                            <input id="ap" type="text" placeholder="Heslo" class="bg-slate-800 border border-slate-700 p-3 rounded-xl outline-none">
+                        </div>
+                        <button onclick="window.addUser()" class="w-full bg-emerald-600 py-3 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-lg">Pridať do zoznamu</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- LOGIKA ---
+        window.setTab = (t) => { state.activeTab = t; updateUI(); };
+        
+        window.login = async () => {
+            const uInput = document.getElementById('u').value;
+            const pInput = document.getElementById('p').value;
+            
+            if (!state.fbUser) return alert("Ešte nie ste pripojení k serveru.");
+
+            if (uInput === 'admin' && pInput === '410292') {
+                state.user = { id: 'admin-root', displayName: 'Hlavný Admin', role: 'admin', avatar: '👑' };
+                state.isLoggedIn = true;
+                startDataSync();
+            } else {
+                try {
+                    const snap = await getDocs(getColl('app_users'));
+                    const found = snap.docs.find(d => d.data().username === uInput && d.data().password === pInput);
+                    if (found) {
+                        state.user = { id: found.id, ...found.data() };
+                        state.isLoggedIn = true;
+                        startDataSync();
+                    } else {
+                        alert('Nesprávne údaje!');
+                    }
+                } catch (err) {
+                    console.error("Login fetch error:", err);
+                    alert("Chyba pri overovaní. Skúste to znova.");
+                }
+            }
+        };
+
+        window.send = async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('msg-in');
+            if (!input.value.trim() || !state.fbUser) return;
+            const text = input.value;
+            input.value = '';
+            
+            try {
+                await addDoc(getMsgColl('common'), {
+                    text,
+                    sender: state.user.displayName,
+                    senderUid: state.user.id,
+                    avatar: state.user.avatar,
+                    createdAt: serverTimestamp()
+                });
+            } catch (err) {
+                console.error("Send error:", err);
+            }
+        };
+
+        window.addUser = async () => {
+            const n = document.getElementById('an').value;
+            const u = document.getElementById('au').value;
+            const p = document.getElementById('ap').value;
+            if (!n || !u || !p) return;
+            try {
+                await addDoc(getColl('app_users'), { displayName: n, username: u, password: p, role: 'student', avatar: '👦' });
+                alert('Žiak úspešne pridaný!');
+                updateUI();
+            } catch (err) {
+                console.error("Add user error:", err);
+            }
+        };
+
+        function startDataSync() {
+            if (!state.fbUser) return;
+
+            // Sledovanie správ v reálnom čase
+            const q = query(getMsgColl('common'), orderBy('createdAt', 'asc'));
+            onSnapshot(q, (snap) => {
+                state.messages = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                updateUI();
+            }, (err) => {
+                console.error("Sync error in snapshot:", err);
+            });
+        }
+
+        function setupScroll() {
+            const b = document.getElementById('msg-box');
+            if (b) b.scrollTop = b.scrollHeight;
+        }
+
+        // --- INICIALIZÁCIA AUTENTIFIKÁCIE (Pravidlo 3) ---
+        const initAuth = async () => {
+            try {
+                if (initialToken) {
+                    await signInWithCustomToken(auth, initialToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) {
+                console.error("Auth initialization failed:", err);
+            }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            state.fbUser = user;
+            if (user) {
+                console.log("Pripojený ako:", user.uid);
+                updateUI();
+            } else {
+                initAuth();
+            }
+        });
+
+        window.onload = () => {
+            updateUI();
+        };
+
+    </script>
+</body>
+</html>
